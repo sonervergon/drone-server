@@ -1,41 +1,30 @@
 
-from dronekit import connect, VehicleMode
-import time
-import logging
+from dronekit import connect
+from mqtt_connection import create_connection
+from logger import init
+from rate_limiter import RateLimiter
 import asyncio
+import json
 
-
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
-
+logger = init()
 loop = asyncio.get_event_loop()
+client = create_connection('2MUTGA.Nn-1bw','0wGuSFcdjKn_qr_J', 'mqtt.ably.io')
 
-class RateLimiter:
-    # MS
-    last_sent = 0
-    def __init__(self, freq = 1):
-        self.frequency = freq
-
-    def run(self, handler, name, value):
-        if self.last_sent < time.time() - 1 / self.frequency:
-            handler(name, value)
-            self.last_sent = time.time()
+handlers = {
+    "location.global_frame": lambda d: { "lat": d.lat, "lon": d.lon, "alt": d.alt }
+}
 
 def handle_change(attr_name, msg):
-    logging.info("%s : %s", attr_name, msg)
+    logger.info("%s : %s", attr_name, msg)
+    payload = handlers[attr_name](msg) if handlers[attr_name] else msg
+    data = { "name": attr_name, "data": payload }
+    client.publish(attr_name, json.dumps(data), qos=0)
 
-async def run(attributes, messages):
+async def run(client, attributes, messages):
     # Default local url  127.0.0.1:14550
     # Connect to the Vehicle.
     print("Connecting to vehicle")
     vehicle = connect("127.0.0.1:14550", wait_ready=True)
-
     for m in messages:
         print("Subscribing to MAVLink message " + m)
         rate_limiter = RateLimiter()
@@ -48,15 +37,15 @@ async def run(attributes, messages):
 
     
 
-vehicle_attributes = ["heading"]
+vehicle_attributes = ["location.global_frame"]
 mavlink_messages = []
 
 def main():
     try:
-        loop.create_task(run(vehicle_attributes, mavlink_messages))
+        loop.create_task(run(client, vehicle_attributes, mavlink_messages))
         loop.run_forever()
     except:
-        logging.error("Event loop crashed")
+        logger.error("Event loop crashed")
         # main()
 
 main()
