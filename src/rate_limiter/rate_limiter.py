@@ -2,7 +2,7 @@ import time
 
 
 class RateLimiter:
-    # MS
+    # ms
     last_sent = 0
     def __init__(self, freq = 1):
         self.frequency = freq
