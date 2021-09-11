@@ -12,6 +12,7 @@ environment = {
     "host": os.environ.get("MQTT_HOST"),
     "port": int(os.environ.get("MQTT_PORT")),
     "asset_tcp_endpoint": os.environ.get("ASSET_TCP_ENDPOINT"),
+    "asset_data": os.environ.get("ASSET_DATA"),
     "asset_host_name": os.environ.get("ASSET_HOST_NAME"),
     "asset_host_id": os.environ.get("ASSET_HOST_ID"),
     "asset_type": os.environ.get("ASSET_TYPE"),

@@ -9,12 +9,16 @@ to achieve concurrency and Exception tolerance.
 from dronekit import connect
 import paho.mqtt.client as mqtt
 from load_env import get
+from rate_limiter.rate_limiter import RateLimiter
+from service.asset_data_point_handlers import handlers
+from service.check_internet import check_internet_connection
 
 # Service dependencies
 import asyncio
 import logging
 import random
 import signal
+import time
 import string
 import attr  # attrs
 
@@ -23,9 +27,14 @@ password = get("password")
 host = get("host")
 port = get("port")
 env = get("env")
+asset_data = get("asset_data")
 asset_host_name = get("asset_host_name")
 asset_host_id = get("asset_host_id")
 asset_tcp_endpoint = get("asset_tcp_endpoint")
+
+instance = f"{asset_host_name}-{asset_host_id}"
+
+asset_data_points = asset_data.split(",") if asset_data else []
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,12 +46,9 @@ logging.basicConfig(
 @attr.s
 class PubSubMessage:
     instance_name = attr.ib()
-    message_id = attr.ib(repr=False)
-    hostname = attr.ib(repr=False, init=False)
-    restarted = attr.ib(repr=False, default=False)
+    data = attr.ib()
     saved = attr.ib(repr=False, default=False)
     acked = attr.ib(repr=False, default=False)
-    extended_cnt = attr.ib(repr=False, default=0)
 
     def __attrs_post_init__(self):
         self.hostname = f"{self.instance_name}.example.net"
@@ -50,12 +56,26 @@ class PubSubMessage:
 
 async def publish(queue, asset_connection):
     # TODO: Subscribe to drone kit server and publish messages from there
+    def handle_change(attr_name, msg):
+        logging.info("%s : %s", attr_name, msg)
+        payload = handlers[attr_name](msg) if handlers[attr_name] else msg
+        data = {"name": attr_name, "data": payload}
+        print(data)
+        # TODO: Add data to the queue for consumption.
+        # asyncio.create_task(queue.put(data))
+
+    rate_limiter = RateLimiter()
+    for data_point in asset_data_points:
+        asset_connection.add_message_listener(
+            data_point,
+            lambda _self, name, value: rate_limiter.run(handle_change, name, value),
+        )
     choices = string.ascii_lowercase + string.digits
     # while True:
     #     msg_id = str(uuid.uuid4())
     #     host_id = "".join(random.choices(choices, k=4))
     #     instance_name = f"cattle-{host_id}"
-    #     msg = PubSubMessage(message_id=msg_id, instance_name=instance_name)
+    #     msg = PubSubMessage(message_id=msg_id, instance_name=instance)
     #     asyncio.create_task(queue.put(msg))
     #     logging.debug(f"Published message {msg}")
     #     await asyncio.sleep(random.random())
@@ -76,13 +96,6 @@ async def cleanup(msg, event):
     logging.info(f"Done. Acked {msg}")
 
 
-async def extend(msg, event):
-    while not event.is_set():
-        msg.extended_cnt += 1
-        logging.info(f"Extended deadline by 3 seconds for {msg}")
-        await asyncio.sleep(2)
-
-
 def handle_results(results, msg):
     for result in results:
         if isinstance(result, Exception):
@@ -92,7 +105,6 @@ def handle_results(results, msg):
 async def handle_message(msg):
     event = asyncio.Event()
 
-    asyncio.create_task(extend(msg, event))
     asyncio.create_task(cleanup(msg, event))
 
     results = await asyncio.gather(save(msg), return_exceptions=True)
@@ -107,14 +119,14 @@ async def consume(queue, asset_connection):
         asyncio.create_task(handle_message(msg))
 
 
-def handle_exception(loop, context):
+def handle_exception(loop, context, asset_connection):
     msg = context.get("exception", context["message"])
     logging.error(f"Caught exception: {msg}")
     logging.info("Shutting down...")
-    asyncio.create_task(shutdown(loop))
+    asyncio.create_task(shutdown(loop, asset_connection))
 
 
-async def shutdown(loop, signal=None):
+async def shutdown(loop, asset_connection, signal=None):
     if signal:
         logging.info(f"Received exit signal {signal.name}...")
 
@@ -123,6 +135,9 @@ async def shutdown(loop, signal=None):
 
     logging.info("Closing mqtt connection")
     client.disconnect()
+
+    logging.info("Closing asset connection")
+    asset_connection.close()
 
     [task.cancel() for task in tasks]
     logging.info("Cancelling outstanding tasks")
@@ -165,25 +180,41 @@ def service():
          see: https://dronekit-python.readthedocs.io/en/latest/develop/sitl_setup.html
         Production: "127.0.0.1:14550"
         """
-        asset = None
+        asset_connection = None
         try:
-            asset = connect(asset_tcp_endpoint, wait_ready=True)
+            asset_connection = connect(asset_tcp_endpoint, wait_ready=True)
         except:
-            logging.error("Failed to initialize connection to drone, is it on?")
-        if not asset:
+            logging.error("Failed to initialize connection to drone, is it running?")
+        if not asset_connection:
             loop.stop()
             return
+        internet_access = False
+        retries = 0
+        logging.info(f"Checking internet connection")
+        while not internet_access:
+            internet_access = check_internet_connection()
+            if internet_access:
+                logging.info(f"Connected to the internet, proceeding")
+            else:
+                logging.info(
+                    f"Failed to receive internet response, retrying. Retries: {retries}"
+                )
+            time.sleep(retries / 4)
+            retries += 1
         loop.create_task(connect_to_client())
         loop.set_exception_handler(
-            lambda loop, context: handle_exception(loop, context)
+            lambda loop, context: handle_exception(loop, context, asset_connection)
         )
         for s in signals:
             loop.add_signal_handler(
-                s, lambda s=s: asyncio.create_task(shutdown(loop, signal=s))
+                s,
+                lambda s=s: asyncio.create_task(
+                    shutdown(loop, asset_connection, signal=s)
+                ),
             )
-        loop.create_task(publish(queue, asset))
-        loop.create_task(consume(queue, asset))
+        loop.create_task(publish(queue, asset_connection))
+        loop.create_task(consume(queue, asset_connection))
         loop.run_forever()
     finally:
         loop.close()
-        logging.info(f"Successfully shutdown {asset_host_name}-{asset_host_id}.")
+        logging.info(f"Successfully shutdown {instance}.")
