@@ -110,6 +110,7 @@ async def handle_message(msg):
     results = await asyncio.gather(save(msg), return_exceptions=True)
     handle_results(results, msg)
     event.set()
+    msg.task_done()
 
 
 async def consume(queue, asset_connection):
