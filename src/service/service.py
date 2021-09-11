@@ -37,7 +37,7 @@ instance = f"{asset_host_name}-{asset_host_id}"
 asset_data_points = asset_data.split(",") if asset_data else []
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if env == "development" else logging.ERROR,
     format=f"%(asctime)s.%(msecs)d, {asset_host_id} %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -150,10 +150,10 @@ async def shutdown(loop, asset_connection, signal=None):
 async def connect_to_client():
     async def connect():
         def on_connect(client, userdata, flags, rc):
-            logging.info("Mqtt client connected to: " + client._host)
+            logging.critical("Mqtt client connected to: " + client._host)
 
         def on_disconnect(client, userdata, rc):
-            logging.info("Disconnected from: " + client._host)
+            logging.critical("Disconnected from: " + client._host)
 
         global client
         client = mqtt.Client()
@@ -169,8 +169,8 @@ async def connect_to_client():
 
 
 def service():
-    logging.info(f"ENV: {env}")
-    logging.info(f"Initializing {asset_host_name}-{asset_host_id}")
+    logging.critical(f"ENV: {env}")
+    logging.critical(f"Initializing {asset_host_name}-{asset_host_id}")
     loop = asyncio.get_event_loop()
     signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
     queue = asyncio.Queue()
@@ -191,7 +191,7 @@ def service():
             return
         internet_access = False
         retries = 0
-        logging.info(f"Checking internet connection")
+        logging.critical(f"Checking internet connection")
         while not internet_access:
             internet_access = check_internet_connection()
             if internet_access:
@@ -218,4 +218,4 @@ def service():
         loop.run_forever()
     finally:
         loop.close()
-        logging.info(f"Successfully shutdown {instance}.")
+        logging.critical(f"Successfully shutdown {instance}.")
