@@ -16,7 +16,7 @@ environment = {
     "asset_host_name": os.environ.get("ASSET_HOST_NAME"),
     "asset_host_id": os.environ.get("ASSET_HOST_ID"),
     "asset_type": os.environ.get("ASSET_TYPE"),
-    "asset_workspace": os.environ.get("ASSET_WORKSPACE"),
+    "workspace_id": os.environ.get("ASSET_WORKSPACE"),
     "asset_schema_reference": os.environ.get("ASSET_SCHEMA_REFERENCE"),
 }
 

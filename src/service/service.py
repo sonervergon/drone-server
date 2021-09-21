@@ -27,11 +27,14 @@ password = get("password")
 host = get("host")
 port = get("port")
 env = get("env")
+workspace_id = get("workspace_id")
 asset_data = get("asset_data")
 asset_host_name = get("asset_host_name")
 asset_host_id = get("asset_host_id")
 asset_tcp_endpoint = get("asset_tcp_endpoint")
 
+
+channel_name = workspace_id + ":" + asset_host_id
 instance = f"{asset_host_name}-{asset_host_id}"
 
 asset_data_points = asset_data.split(",") if asset_data else []
@@ -54,15 +57,13 @@ class PubSubMessage:
         self.hostname = f"{self.instance_name}.example.net"
 
 
-async def publish(queue, asset_connection):
-    # TODO: Subscribe to drone kit server and publish messages from there
+async def subscribe_to_asset(outbound_queue, asset_connection):
     def handle_change(attr_name, msg):
         logging.info("%s : %s", attr_name, msg)
         payload = handlers[attr_name](msg) if handlers[attr_name] else msg
         data = {"name": attr_name, "data": payload}
         print(data)
-        # TODO: Add data to the queue for consumption.
-        # asyncio.create_task(queue.put(data))
+        asyncio.create_task(outbound_queue.put(data))
 
     rate_limiter = RateLimiter()
     for data_point in asset_data_points:
@@ -70,23 +71,6 @@ async def publish(queue, asset_connection):
             data_point,
             lambda _self, name, value: rate_limiter.run(handle_change, name, value),
         )
-    choices = string.ascii_lowercase + string.digits
-    # while True:
-    #     msg_id = str(uuid.uuid4())
-    #     host_id = "".join(random.choices(choices, k=4))
-    #     instance_name = f"cattle-{host_id}"
-    #     msg = PubSubMessage(message_id=msg_id, instance_name=instance)
-    #     asyncio.create_task(queue.put(msg))
-    #     logging.debug(f"Published message {msg}")
-    #     await asyncio.sleep(random.random())
-
-
-async def save(msg):
-    await asyncio.sleep(random.random())
-    # TODO: Send message to server over mqtt.
-    # if random.randrange(1, 5) == 3:
-    #     raise Exception(f"Could not save {msg}")
-    logging.info(f"Saved {msg} into database")
 
 
 async def cleanup(msg, event):
@@ -96,19 +80,9 @@ async def cleanup(msg, event):
     logging.info(f"Done. Acked {msg}")
 
 
-def handle_results(results, msg):
-    for result in results:
-        if isinstance(result, Exception):
-            logging.error(f"Handling general error: {result}")
-
-
 async def handle_message(msg):
     event = asyncio.Event()
-
     asyncio.create_task(cleanup(msg, event))
-
-    results = await asyncio.gather(save(msg), return_exceptions=True)
-    handle_results(results, msg)
     event.set()
     msg.task_done()
 
@@ -168,12 +142,30 @@ async def connect_to_client():
     await asyncio.gather(connect(), return_exceptions=True)
 
 
+async def publish_message(msg, event):
+    await event.wait()
+    await client.publish(channel_name + ":outbound", msg, qos=0)
+
+
+async def process_outbound_messages(outbound_queue):
+    logging.info("Listening for outbound messages")
+    while True:
+        msg = await outbound_queue.get()
+        logging.info(f"Processing outbound message: {msg}")
+        event = asyncio.Event()
+        asyncio.create_task(publish_message(msg, event))
+        event.set()
+        msg.task_done()
+
+
 def service():
     logging.critical(f"ENV: {env}")
     logging.critical(f"Initializing {asset_host_name}-{asset_host_id}")
+    logging.critical(f"Will publish messages on topic {channel_name}")
     loop = asyncio.get_event_loop()
     signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
-    queue = asyncio.Queue()
+    inbound_queue = asyncio.Queue()
+    outbound_queue = asyncio.Queue()
 
     try:
         """
@@ -213,8 +205,9 @@ def service():
                     shutdown(loop, asset_connection, signal=s)
                 ),
             )
-        loop.create_task(publish(queue, asset_connection))
-        loop.create_task(consume(queue, asset_connection))
+        loop.create_task(process_outbound_messages(outbound_queue))
+        loop.create_task(subscribe_to_asset(outbound_queue, asset_connection))
+        loop.create_task(consume(inbound_queue, asset_connection))
         loop.run_forever()
     finally:
         loop.close()
