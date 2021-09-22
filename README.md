@@ -18,3 +18,24 @@ The environment variables in the `.env` file are secret and should not be shared
 
 1. Start drone, run `dronekit-sitl copter` in terminal.
 2. Start drone service, run `python3 __init__.py` from root.
+
+
+Sample data to arm drone:
+```json
+{
+  "name": "INSTRUCTION",
+  "payload": {
+    "action": "MODE",
+    "payload": "GUIDED"
+  }
+}
+```
+```json
+{
+  "name": "INSTRUCTION",
+  "payload": {
+    "action": "ARM",
+    "payload": {}
+  }
+}
+```

@@ -13,11 +13,11 @@ from load_env import get
 from rate_limiter.rate_limiter import RateLimiter
 from service.asset_data_point_handlers import handlers
 from service.check_internet import check_internet_connection
+from service.inbound_message_handlers import process_inbound_drone_instruction
 
 # Service dependencies
 import asyncio
 import logging
-import random
 import signal
 import time
 import json
@@ -76,25 +76,16 @@ async def subscribe_to_asset(outbound_queue, asset_connection):
         )
 
 
-async def cleanup(msg, event):
-    await event.wait()
-    await asyncio.sleep(random.random())
-    msg.acked = True
-    logging.info(f"Done. Acked {msg}")
+async def handle_message(inbound_queue, asset_connection, msg):
+    process_inbound_drone_instruction(msg, asset_connection)
+    inbound_queue.task_done()
 
 
-async def handle_message(msg):
-    event = asyncio.Event()
-    asyncio.create_task(cleanup(msg, event))
-    event.set()
-    msg.task_done()
-
-
-async def consume(queue, asset_connection):
+async def consume(inbound_queue, asset_connection):
     while True:
-        msg = await queue.get()
+        msg = await inbound_queue.get()
         logging.info(f"Pulled {msg}")
-        asyncio.create_task(handle_message(msg))
+        asyncio.create_task(handle_message(inbound_queue, asset_connection, msg))
 
 
 def handle_exception(loop, context, asset_connection, client):
@@ -175,8 +166,11 @@ async def subscribe_to_inbound_messages(inbound_queue, client):
         except:
             logging.debug("Failed to convert data to json" + decoded_data)
 
-    client.subscribe(inbound_topic)
-    client.on_message = handle_message
+    while True:
+        client.subscribe(inbound_topic)
+        client.on_message = handle_message
+        await asyncio.sleep(0.1)
+        client.unsubscribe(inbound_topic)
 
 
 def service():
