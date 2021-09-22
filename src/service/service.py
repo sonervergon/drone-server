@@ -6,6 +6,7 @@ to achieve concurrency and Exception tolerance.
 
 
 # Feature dependencies
+from base64 import decode
 from dronekit import connect
 import paho.mqtt.client as mqtt
 from load_env import get
@@ -19,7 +20,7 @@ import logging
 import random
 import signal
 import time
-import string
+import json
 import attr  # attrs
 
 username = get("username")
@@ -35,6 +36,8 @@ asset_tcp_endpoint = get("asset_tcp_endpoint")
 
 
 channel_name = workspace_id + ":" + asset_host_id
+outbound_topic = channel_name + ":outbound"
+inbound_topic = channel_name + ":inbound"
 instance = f"{asset_host_name}-{asset_host_id}"
 
 asset_data_points = asset_data.split(",") if asset_data else []
@@ -94,20 +97,26 @@ async def consume(queue, asset_connection):
         asyncio.create_task(handle_message(msg))
 
 
-def handle_exception(loop, context, asset_connection):
+def handle_exception(loop, context, asset_connection, client):
     msg = context.get("exception", context["message"])
+    print(context)
     logging.error(f"Caught exception: {msg}")
     logging.info("Shutting down...")
-    asyncio.create_task(shutdown(loop, asset_connection))
+    asyncio.create_task(shutdown(loop, asset_connection, client))
 
 
-async def shutdown(loop, asset_connection, signal=None):
+async def shutdown(
+    loop,
+    asset_connection,
+    client,
+    signal=None,
+):
     if signal:
         logging.info(f"Received exit signal {signal.name}...")
 
     logging.info("Nacking outstanding messages")
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-
+    client.publish(outbound_topic, "offline")
     logging.info("Closing mqtt connection")
     client.disconnect()
 
@@ -121,30 +130,27 @@ async def shutdown(loop, asset_connection, signal=None):
     loop.stop()
 
 
-async def connect_to_client():
-    async def connect():
-        def on_connect(client, userdata, flags, rc):
-            logging.critical("Mqtt client connected to: " + client._host)
+def connect_to_client():
+    def on_connect(client, userdata, flags, rc):
+        logging.critical("Mqtt client connected to: " + client._host)
+        client.publish(outbound_topic, "connected")
 
-        def on_disconnect(client, userdata, rc):
-            logging.critical("Disconnected from: " + client._host)
+    def on_disconnect(client, userdata, rc):
+        logging.critical("Disconnected from: " + client._host)
 
-        global client
-        client = mqtt.Client()
-        client.username_pw_set(username, password)
-        client.tls_set()
-        client.loop_start()
-        client.connect(host, port=8883, keepalive=16)
-        client.on_connect = on_connect
-        client.on_disconnect = on_disconnect
-        return client
-
-    await asyncio.gather(connect(), return_exceptions=True)
+    client = mqtt.Client()
+    client.username_pw_set(username, password)
+    client.tls_set()
+    client.loop_start()
+    client.connect(host, port=8883, keepalive=16)
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    return client
 
 
-async def publish_message(msg, event):
+async def publish_message(msg, event, client):
     await event.wait()
-    await client.publish(channel_name + ":outbound", msg, qos=0)
+    client.publish(outbound_topic, msg, qos=0)
 
 
 async def process_outbound_messages(outbound_queue):
@@ -158,6 +164,21 @@ async def process_outbound_messages(outbound_queue):
         msg.task_done()
 
 
+async def subscribe_to_inbound_messages(inbound_queue, client):
+    def handle_message(client, userdata, msg):
+        logging.info("Received message on topic: " + msg.topic)
+        decoded_data = msg.payload.decode("utf-8")
+        logging.debug("Processing payload " + decoded_data)
+        try:
+            data = json.loads(decoded_data)
+            inbound_queue.put_nowait(data)
+        except:
+            logging.debug("Failed to convert data to json" + decoded_data)
+
+    client.subscribe(inbound_topic)
+    client.on_message = handle_message
+
+
 def service():
     logging.critical(f"ENV: {env}")
     logging.critical(f"Initializing {asset_host_name}-{asset_host_id}")
@@ -166,7 +187,20 @@ def service():
     signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
     inbound_queue = asyncio.Queue()
     outbound_queue = asyncio.Queue()
-
+    internet_access = False
+    retries = 0
+    logging.critical(f"Checking internet connection")
+    while not internet_access:
+        internet_access = check_internet_connection()
+        if internet_access:
+            logging.info(f"Connected to the internet, proceeding")
+        else:
+            logging.info(
+                f"Failed to receive internet response, retrying. Retries: {retries}"
+            )
+        time.sleep(retries / 4)
+        retries += 1
+    client = connect_to_client()
     try:
         """
         `connect` requires a virtual drone running on your computer
@@ -181,33 +215,27 @@ def service():
         if not asset_connection:
             loop.stop()
             return
-        internet_access = False
-        retries = 0
-        logging.critical(f"Checking internet connection")
-        while not internet_access:
-            internet_access = check_internet_connection()
-            if internet_access:
-                logging.info(f"Connected to the internet, proceeding")
-            else:
-                logging.info(
-                    f"Failed to receive internet response, retrying. Retries: {retries}"
-                )
-            time.sleep(retries / 4)
-            retries += 1
-        loop.create_task(connect_to_client())
+
+        while not asset_connection.is_armable:
+            time.sleep(1)
+        logging.critical("Drone is ready to be armed, continuing")
         loop.set_exception_handler(
-            lambda loop, context: handle_exception(loop, context, asset_connection)
+            lambda loop, context: handle_exception(
+                loop, context, asset_connection, client
+            )
         )
         for s in signals:
             loop.add_signal_handler(
                 s,
                 lambda s=s: asyncio.create_task(
-                    shutdown(loop, asset_connection, signal=s)
+                    shutdown(loop, asset_connection, client, signal=s)
                 ),
             )
         loop.create_task(process_outbound_messages(outbound_queue))
         loop.create_task(subscribe_to_asset(outbound_queue, asset_connection))
+
         loop.create_task(consume(inbound_queue, asset_connection))
+        loop.create_task(subscribe_to_inbound_messages(inbound_queue, client))
         loop.run_forever()
     finally:
         loop.close()
